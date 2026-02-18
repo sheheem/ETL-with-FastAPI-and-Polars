@@ -5,4 +5,4 @@ polars
 psycopg2-binary
 python-multipart
 fastexcel
-alembic 1.18.3
+alembic==1.18.3

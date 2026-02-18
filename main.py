@@ -1,8 +1,9 @@
-from fastapi import FastAPI, UploadFile, File, Depends
+from fastapi import FastAPI, UploadFile, File, Depends, Query
 from pydantic import validate_call
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from uuid import uuid4
+from fastapi.middleware.cors import CORSMiddleware
 
 import polars as pl
 import datetime as dt
@@ -13,6 +14,17 @@ from models.database import UploadData, UploadRawData
 from schemas.upload_data import UploadDataResponse, MappingConfig
 
 app = FastAPI()
+origins = [
+    "http://localhost:4200",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def get_db():
     db = SessionLocal()
@@ -106,7 +118,7 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
     return upload_record
 
 @app.get("/preview/{upload_id}")
-async def preview_data(upload_id: int, page:int = 1, page_size:int = 10, db: Session = Depends(get_db)):
+async def preview_data(upload_id: int, page:int = 1, page_size:int = Query(10, le = 100), db: Session = Depends(get_db)):
     upload = db.query(UploadData).get(upload_id)
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
@@ -129,6 +141,7 @@ async def preview_data(upload_id: int, page:int = 1, page_size:int = 10, db: Ses
     return {
         "columns": preview_df.columns,
         "rows": preview_df.to_dicts(),
+        "page_size": page_size,
         "total_count": total_count,
         "total_page": (total_count + page_size - 1) // page_size
     }
