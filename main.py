@@ -1,9 +1,10 @@
-from fastapi import FastAPI, UploadFile, File, Depends, Query
+from fastapi import FastAPI, UploadFile, File, Depends, Query, HTTPException
 from pydantic import validate_call
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from uuid import uuid4
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm.attributes import flag_modified
 
 import polars as pl
 import datetime as dt
@@ -136,12 +137,91 @@ async def preview_data(upload_id: int, page:int = 1, page_size:int = Query(10, l
 
 
     df = pl.DataFrame([r.data for r in raw_rows])
+    for col in upload.mapping_config["columns"]:
+        if col.get("is_custom") and col["original_name"] not in df.columns:
+            df = df.with_columns(pl.lit(col["sanitization"]["default_value"]).alias(col["original_name"]))
+    
     preview_df = apply_sanitization(df, upload.mapping_config)
 
+    columns_with_meta = [
+        {
+            "name": col["original_name"],
+            "is_custom": col.get("is_custom", False),
+        }
+        for col in upload.mapping_config["columns"]
+    ]
+
     return {
-        "columns": preview_df.columns,
+        "columns": columns_with_meta,
         "rows": preview_df.to_dicts(),
         "page_size": page_size,
         "total_count": total_count,
         "total_page": (total_count + page_size - 1) // page_size
     }
+
+@app.post("/add-column/{upload_id}")
+def add_column(upload_id: int, column_name: str, default_value: str = "", db: Session = Depends(get_db)):
+    upload = db.get(UploadData, upload_id)
+
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    mapping_config = upload.mapping_config
+
+    # check if column already exists
+    for col in mapping_config["columns"]:
+        if col["original_name"] == column_name:
+            raise HTTPException(status_code=400, detail="Column already exists")
+
+    new_column = {
+        "id": column_name,
+        "original_name": column_name,
+        "mapping_name": column_name.lower().replace(" ", "_"),
+        "data_type": "string",
+        "is_custom": True,
+        "sanitization": {
+            "is_categorical": False,
+            "is_duplicity": False,
+            "is_encrypted": False,
+            "null_handling": "default",
+            "default_value": default_value
+        }
+    }
+
+    upload.mapping_config["columns"].append(new_column)
+    flag_modified(upload, "mapping_config")
+    db.commit()
+
+    return {"message": "Column added successfully"}
+
+@app.delete("/delete-column/{upload_id}")
+def delete_column(upload_id: int, column_name: str, db: Session = Depends(get_db)):
+    upload = db.get(UploadData, upload_id)
+
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    mapping_config = upload.mapping_config
+
+    new_columns = []
+
+    found = False
+    for col in mapping_config["columns"]:
+        if col["original_name"] == column_name:
+            if not col.get("is_custom"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only custom columns can be deleted"
+                )
+            found = True
+            continue
+        new_columns.append(col)
+
+    if not found:
+        raise HTTPException(status_code=404, detail="Column not found")
+
+    upload.mapping_config["columns"] = new_columns
+    flag_modified(upload, "mapping_config")
+    db.commit()
+
+    return {"message": "Column deleted successfully"}
